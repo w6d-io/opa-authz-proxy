@@ -1,0 +1,5 @@
+opa-authz-proxy
+*.exe
+*.dll
+*.so
+*.dylib
