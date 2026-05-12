@@ -55,17 +55,49 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 			return
 		}
 
-		var decision struct {
-			Result bool `json:"result"`
+		// Accept two shapes for /v1/data/rbac/* responses:
+		//   1. { "result": true|false }                                  -> legacy /allow
+		//   2. { "result": { "allow": bool, "groups": [...] } }          -> /decision
+		// The /decision shape lets the proxy inject X-User-Groups from
+		// server-side trusted data (OPA's data.bindings.group_membership
+		// fed by OPAL from Redis) without exposing Kratos metadata_admin
+		// through /sessions/whoami.
+		var envelope struct {
+			Result json.RawMessage `json:"result"`
 		}
-		if err := json.Unmarshal(body, &decision); err != nil {
+		if err := json.Unmarshal(body, &envelope); err != nil {
 			logger.Error("failed to parse OPA response", "error", err, "body", string(body))
 			http.Error(w, `{"error":"bad gateway"}`, http.StatusBadGateway)
 			return
 		}
 
+		allowed := false
+		var rich struct {
+			Allow  bool     `json:"allow"`
+			Groups []string `json:"groups"`
+		}
+		if err := json.Unmarshal(envelope.Result, &rich); err == nil && len(envelope.Result) > 0 && envelope.Result[0] == '{' {
+			allowed = rich.Allow
+			// Always set the header (empty array when no groups) so the
+			// upstream sees a deterministic value via oathkeeper's
+			// forward_response_headers_to_upstream.
+			groupsJSON, _ := json.Marshal(rich.Groups)
+			if rich.Groups == nil {
+				groupsJSON = []byte("[]")
+			}
+			w.Header().Set("X-User-Groups", string(groupsJSON))
+		} else {
+			var b bool
+			if err := json.Unmarshal(envelope.Result, &b); err != nil {
+				logger.Error("failed to parse OPA result", "error", err, "body", string(body))
+				http.Error(w, `{"error":"bad gateway"}`, http.StatusBadGateway)
+				return
+			}
+			allowed = b
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		if decision.Result {
+		if allowed {
 			w.WriteHeader(http.StatusOK)
 			w.Write(body)
 		} else {
