@@ -72,8 +72,16 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 		}
 
 		allowed := false
-		denyStatus := http.StatusForbidden // default deny → 403
-		denyBody := `{"error":"forbidden"}`
+		// Oathkeeper's remote_json authorizer accepts only HTTP 200
+		// (allow) or HTTP 403 (deny). Anything else is treated as an
+		// internal error and surfaces as 500 to the caller — including
+		// codes like 404 that one might be tempted to use to signal
+		// "route_map miss". Keep deny at 403 unconditionally and let
+		// the rego's decision.reason ride along as informational
+		// telemetry (logged below, also reachable for upstream
+		// services through forward_response_headers_to_upstream if
+		// they want to differentiate).
+		var reason string
 		var rich struct {
 			Allow  bool     `json:"allow"`
 			Groups []string `json:"groups"`
@@ -81,6 +89,7 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 		}
 		if err := json.Unmarshal(envelope.Result, &rich); err == nil && len(envelope.Result) > 0 && envelope.Result[0] == '{' {
 			allowed = rich.Allow
+			reason = rich.Reason
 			// Always set the header (empty array when no groups) so the
 			// upstream sees a deterministic value via oathkeeper's
 			// forward_response_headers_to_upstream.
@@ -89,14 +98,11 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 				groupsJSON = []byte("[]")
 			}
 			w.Header().Set("X-User-Groups", string(groupsJSON))
-			// rego reports `not_found` when the requested path is not
-			// declared in any service's route_map. Surface that as a
-			// 404 so the error-page renders "Not found" instead of
-			// "Access denied" — and so unauthenticated scanners can't
-			// fingerprint protected paths from 403/404 differences.
-			if rich.Reason == "not_found" {
-				denyStatus = http.StatusNotFound
-				denyBody = `{"error":"not_found"}`
+			// Emit the reason as an informational header. Stays a 403
+			// either way; upstreams that wire forward_response_headers
+			// can render different copy for not_found vs forbidden.
+			if reason != "" {
+				w.Header().Set("X-Authz-Reason", reason)
 			}
 		} else {
 			var b bool
@@ -113,9 +119,9 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 			w.WriteHeader(http.StatusOK)
 			w.Write(body)
 		} else {
-			logger.Info("access denied", "path", r.URL.Path, "status", denyStatus)
-			w.WriteHeader(denyStatus)
-			w.Write([]byte(denyBody))
+			logger.Info("access denied", "path", r.URL.Path, "reason", reason)
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"forbidden"}`))
 		}
 	})
 
