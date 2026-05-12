@@ -72,9 +72,12 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 		}
 
 		allowed := false
+		denyStatus := http.StatusForbidden // default deny → 403
+		denyBody := `{"error":"forbidden"}`
 		var rich struct {
 			Allow  bool     `json:"allow"`
 			Groups []string `json:"groups"`
+			Reason string   `json:"reason"`
 		}
 		if err := json.Unmarshal(envelope.Result, &rich); err == nil && len(envelope.Result) > 0 && envelope.Result[0] == '{' {
 			allowed = rich.Allow
@@ -86,6 +89,15 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 				groupsJSON = []byte("[]")
 			}
 			w.Header().Set("X-User-Groups", string(groupsJSON))
+			// rego reports `not_found` when the requested path is not
+			// declared in any service's route_map. Surface that as a
+			// 404 so the error-page renders "Not found" instead of
+			// "Access denied" — and so unauthenticated scanners can't
+			// fingerprint protected paths from 403/404 differences.
+			if rich.Reason == "not_found" {
+				denyStatus = http.StatusNotFound
+				denyBody = `{"error":"not_found"}`
+			}
 		} else {
 			var b bool
 			if err := json.Unmarshal(envelope.Result, &b); err != nil {
@@ -101,9 +113,9 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 			w.WriteHeader(http.StatusOK)
 			w.Write(body)
 		} else {
-			logger.Info("access denied", "path", r.URL.Path)
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"forbidden"}`))
+			logger.Info("access denied", "path", r.URL.Path, "status", denyStatus)
+			w.WriteHeader(denyStatus)
+			w.Write([]byte(denyBody))
 		}
 	})
 
