@@ -1,12 +1,55 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 )
+
+// tenantHeader is the request header the SPA attaches after the user
+// picks an organization. opa-authz-proxy promotes it into the OPA
+// decision payload as `input.organization_id` so rego can enforce
+// the Path 3 hybrid tenant gate without trusting client-side data
+// any further than this single hop.
+const tenantHeader = "X-Tenant-Id"
+
+// injectTenantID rewrites the incoming OPA decision body to set
+// `input.organization_id` from the request's X-Tenant-Id header.
+// The header value is authoritative: if both header and an existing
+// body field are present, the header wins (single source of truth =
+// the SPA's currently-selected org).
+//
+// Returns the (possibly mutated) body bytes, and true when a mutation
+// happened. Non-JSON bodies, non-object inputs, and bodies that
+// don't carry an "input" key are returned unchanged.
+func injectTenantID(body []byte, tenantID string) ([]byte, bool) {
+	if tenantID == "" {
+		return body, false
+	}
+	// Decode into a generic map so we don't lose unknown fields.
+	var envelope map[string]any
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return body, false
+	}
+	rawInput, ok := envelope["input"]
+	if !ok {
+		return body, false
+	}
+	input, ok := rawInput.(map[string]any)
+	if !ok {
+		return body, false
+	}
+	input["organization_id"] = tenantID
+	envelope["input"] = input
+	mutated, err := json.Marshal(envelope)
+	if err != nil {
+		return body, false
+	}
+	return mutated, true
+}
 
 func main() {
 	upstream := env("OPA_UPSTREAM_URL", "http://localhost:8181")
@@ -32,13 +75,55 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		opaURL := upstream + r.URL.Path
-		opaReq, err := http.NewRequestWithContext(r.Context(), r.Method, opaURL, r.Body)
+
+		// Read the incoming body once so we can (a) optionally rewrite
+		// it to carry `input.organization_id` from the X-Tenant-Id
+		// header, and (b) still hand a fresh io.Reader to OPA. Bound
+		// the read with http.MaxBytesReader-style behaviour via the
+		// surrounding server defaults — Go's net/http already caps
+		// request bodies based on Server.MaxHeaderBytes for the
+		// header and the http2 default frame size for the body; for
+		// a /v1/data POST these caps are well above anything legitimate.
+		var bodyBytes []byte
+		if r.Body != nil {
+			var err error
+			bodyBytes, err = io.ReadAll(r.Body)
+			if err != nil {
+				logger.Error("failed to read request body", "error", err)
+				http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+				return
+			}
+			r.Body.Close()
+		}
+
+		// Promote X-Tenant-Id into the OPA input payload when present.
+		// The mutation is best-effort: a non-JSON body or a body that
+		// doesn't carry an `input` object passes through unchanged so
+		// non-decision endpoints (e.g. /v1/data with a custom query)
+		// keep working.
+		mutated, didInject := injectTenantID(bodyBytes, r.Header.Get(tenantHeader))
+		if didInject {
+			logger.Debug("injected organization_id from X-Tenant-Id header")
+		}
+
+		opaReq, err := http.NewRequestWithContext(r.Context(), r.Method, opaURL, bytes.NewReader(mutated))
 		if err != nil {
 			logger.Error("failed to create request", "error", err)
 			http.Error(w, `{"error":"internal"}`, http.StatusBadGateway)
 			return
 		}
 		opaReq.Header = r.Header.Clone()
+		// Reset Content-Length so net/http picks the new (possibly
+		// larger) body length from bytes.Reader. Leaving the original
+		// header in place leads OPA to read only the prefix bytes
+		// and reject the body as malformed JSON.
+		opaReq.ContentLength = int64(len(mutated))
+		opaReq.Header.Set("Content-Length", "")
+		// Strip the inbound X-Tenant-Id from the OPA-bound request:
+		// rego reads `input.organization_id`, not a header, and an
+		// untrusted header echoed onward only widens the attack
+		// surface.
+		opaReq.Header.Del(tenantHeader)
 
 		resp, err := http.DefaultClient.Do(opaReq)
 		if err != nil {
@@ -83,24 +168,33 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 		// they want to differentiate).
 		var reason string
 		var rich struct {
-			Allow  bool     `json:"allow"`
-			Groups []string `json:"groups"`
-			Reason string   `json:"reason"`
+			Allow         bool     `json:"allow"`
+			Groups        []string `json:"groups"`
+			Organizations []string `json:"organizations"`
+			Reason        string   `json:"reason"`
 		}
 		if err := json.Unmarshal(envelope.Result, &rich); err == nil && len(envelope.Result) > 0 && envelope.Result[0] == '{' {
 			allowed = rich.Allow
 			reason = rich.Reason
-			// Always set the header (empty array when no groups) so the
-			// upstream sees a deterministic value via oathkeeper's
-			// forward_response_headers_to_upstream.
+			// Always set the headers (empty array when no groups /
+			// organizations) so the upstream sees a deterministic
+			// value via oathkeeper's forward_response_headers_to_upstream.
 			groupsJSON, _ := json.Marshal(rich.Groups)
 			if rich.Groups == nil {
 				groupsJSON = []byte("[]")
 			}
 			w.Header().Set("X-User-Groups", string(groupsJSON))
+
+			orgsJSON, _ := json.Marshal(rich.Organizations)
+			if rich.Organizations == nil {
+				orgsJSON = []byte("[]")
+			}
+			w.Header().Set("X-User-Organizations", string(orgsJSON))
+
 			// Emit the reason as an informational header. Stays a 403
 			// either way; upstreams that wire forward_response_headers
-			// can render different copy for not_found vs forbidden.
+			// can render different copy for not_found / forbidden /
+			// forbidden_org.
 			if reason != "" {
 				w.Header().Set("X-Authz-Reason", reason)
 			}
