@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,18 @@ import (
 // the Path 3 hybrid tenant gate without trusting client-side data
 // any further than this single hop.
 const tenantHeader = "X-Tenant-Id"
+
+// minTokenLength is the shortest OPA_TOKEN the proxy accepts.
+const minTokenLength = 32
+
+// checkToken validates OPA_TOKEN: unset is fine (no token is sent), set must be long enough to be a
+// real shared secret. The error never contains the token.
+func checkToken(token string) error {
+	if token != "" && len(token) < minTokenLength {
+		return errors.New("OPA_TOKEN is set but shorter than 32 characters")
+	}
+	return nil
+}
 
 // injectTenantID rewrites the incoming OPA decision body to set
 // `input.organization_id` from the request's X-Tenant-Id header.
@@ -54,18 +67,26 @@ func injectTenantID(body []byte, tenantID string) ([]byte, bool) {
 func main() {
 	upstream := env("OPA_UPSTREAM_URL", "http://localhost:8181")
 	addr := env("LISTEN_ADDR", ":8080")
+	opaToken := os.Getenv("OPA_TOKEN")
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	mux := newMux(upstream, logger)
+	if err := checkToken(opaToken); err != nil {
+		logger.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
 
-	logger.Info("starting opa-authz-proxy", "addr", addr, "upstream", upstream)
+	mux := newMux(upstream, opaToken, logger)
+
+	logger.Info("starting opa-authz-proxy", "addr", addr, "upstream", upstream, "opa_token", opaToken != "")
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		logger.Error("server failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
+// newMux builds the proxy. opaToken, when not empty, is sent to OPA as a bearer token on every
+// request; the caller's own Authorization never reaches OPA.
+func newMux(upstream, opaToken string, logger *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -124,6 +145,12 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 		// untrusted header echoed onward only widens the attack
 		// surface.
 		opaReq.Header.Del(tenantHeader)
+		// The caller's Authorization is theirs, not OPA's: never forward
+		// it. OPA sees only the proxy's own token, when configured.
+		opaReq.Header.Del("Authorization")
+		if opaToken != "" {
+			opaReq.Header.Set("Authorization", "Bearer "+opaToken)
+		}
 
 		resp, err := http.DefaultClient.Do(opaReq)
 		if err != nil {

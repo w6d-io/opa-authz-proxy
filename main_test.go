@@ -15,7 +15,7 @@ func silentLogger() *slog.Logger {
 }
 
 func TestHealthz(t *testing.T) {
-	mux := newMux("http://unused", silentLogger())
+	mux := newMux("http://unused", "", silentLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -39,7 +39,7 @@ func TestProxyAllowed(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 
 	body := `{"input":{"sub":"user1","object":"/api/test","action":"GET"}}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/allow", strings.NewReader(body))
@@ -62,7 +62,7 @@ func TestProxyDenied(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 
 	body := `{"input":{"sub":"user1","object":"/api/admin","action":"DELETE"}}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/allow", strings.NewReader(body))
@@ -79,7 +79,7 @@ func TestProxyDenied(t *testing.T) {
 }
 
 func TestProxyOPAUnreachable(t *testing.T) {
-	mux := newMux("http://127.0.0.1:1", silentLogger())
+	mux := newMux("http://127.0.0.1:1", "", silentLogger())
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/allow", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
@@ -96,7 +96,7 @@ func TestProxyOPAInvalidJSON(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/allow", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
@@ -116,7 +116,7 @@ func TestProxyForwardsHeaders(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/allow", strings.NewReader(`{}`))
 	req.Header.Set("X-Custom", "test-value")
@@ -139,7 +139,7 @@ func TestProxyForwardsRequestBody(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/allow", strings.NewReader(expectedBody))
 	rec := httptest.NewRecorder()
@@ -264,7 +264,7 @@ func TestProxyInjectsXTenantIdIntoOPAInput(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 	body := `{"input":{"sub":"u","object":"/api/x","action":"GET"}}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/decision", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -306,7 +306,7 @@ func TestProxyOmitsOrgIDWhenHeaderAbsent(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 	body := `{"input":{"sub":"u","object":"/api/x","action":"GET"}}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/decision", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -331,7 +331,7 @@ func TestProxyForwardsXUserOrganizationsHeader(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/decision", strings.NewReader(`{"input":{}}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -354,7 +354,7 @@ func TestProxyEmitsEmptyOrganizationsHeaderWhenNone(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/decision", strings.NewReader(`{"input":{}}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -373,7 +373,7 @@ func TestProxyForwardsOrgsHeaderOnDeny(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/decision", strings.NewReader(`{"input":{}}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -394,7 +394,7 @@ func TestProxyForwardsAuthzReasonOK(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/decision", strings.NewReader(`{"input":{}}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -413,7 +413,7 @@ func TestProxyForwardsAuthzReasonForbidden(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/decision", strings.NewReader(`{"input":{}}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -434,7 +434,7 @@ func TestProxyForwardsAuthzReasonForbiddenOrg(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/decision", strings.NewReader(`{"input":{}}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -457,7 +457,7 @@ func TestProxyForwardsAuthzReasonNotFound(t *testing.T) {
 	}))
 	defer opa.Close()
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/decision", strings.NewReader(`{"input":{}}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -483,7 +483,7 @@ func decide(t *testing.T, opaResult string) *httptest.ResponseRecorder {
 	}))
 	t.Cleanup(opa.Close)
 
-	mux := newMux(opa.URL, silentLogger())
+	mux := newMux(opa.URL, "", silentLogger())
 	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/decision", strings.NewReader(`{"input":{}}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -543,5 +543,72 @@ func TestProxyBooleanResultSetsNoIdentityHeaders(t *testing.T) {
 				t.Fatalf("expected no %s for %s, got %q", h, result, rec.Header().Get(h))
 			}
 		}
+	}
+}
+
+// ─── OPA_TOKEN: the proxy's own bearer token towards OPA ────────────────────
+
+const testToken = "0123456789abcdef0123456789abcdef"
+
+// authorizationSeenByOPA sends one decision request (with `incoming` as the caller's Authorization,
+// if any) and returns what OPA received, and whether it received the header at all.
+func authorizationSeenByOPA(t *testing.T, opaToken, incoming string) (string, bool) {
+	t.Helper()
+	var got string
+	var present bool
+	opa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, present = r.Header["Authorization"]
+		got = r.Header.Get("Authorization")
+		w.Write([]byte(`{"result":{"allow":true,"groups":[],"organizations":[],"reason":"ok"}}`))
+	}))
+	defer opa.Close()
+
+	mux := newMux(opa.URL, opaToken, silentLogger())
+	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/decision", strings.NewReader(`{"input":{}}`))
+	if incoming != "" {
+		req.Header.Set("Authorization", incoming)
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	return got, present
+}
+
+func TestProxySendsOPAToken(t *testing.T) {
+	if got, _ := authorizationSeenByOPA(t, testToken, ""); got != "Bearer "+testToken {
+		t.Fatalf("expected the proxy's bearer token, got %q", got)
+	}
+}
+
+func TestProxyOPATokenReplacesIncomingAuthorization(t *testing.T) {
+	if got, _ := authorizationSeenByOPA(t, testToken, "Bearer caller-session-token"); got != "Bearer "+testToken {
+		t.Fatalf("expected the caller's Authorization replaced by the proxy's token, got %q", got)
+	}
+}
+
+func TestProxyWithoutOPATokenSendsNoAuthorization(t *testing.T) {
+	for _, incoming := range []string{"", "Bearer caller-session-token"} {
+		if got, present := authorizationSeenByOPA(t, "", incoming); present {
+			t.Fatalf("expected no Authorization at OPA (incoming %q), got %q", incoming, got)
+		}
+	}
+}
+
+func TestCheckToken(t *testing.T) {
+	if err := checkToken(""); err != nil {
+		t.Fatalf("unset token must be accepted, got %v", err)
+	}
+	if err := checkToken(testToken); err != nil {
+		t.Fatalf("32-character token must be accepted, got %v", err)
+	}
+	short := testToken[:31]
+	err := checkToken(short)
+	if err == nil {
+		t.Fatal("31-character token must be refused")
+	}
+	if strings.Contains(err.Error(), short) {
+		t.Fatal("the error must not contain the token")
 	}
 }
