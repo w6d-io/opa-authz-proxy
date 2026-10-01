@@ -473,3 +473,75 @@ func TestProxyForwardsAuthzReasonNotFound(t *testing.T) {
 		t.Fatalf("expected reason=not_found, got %q", got)
 	}
 }
+
+// ─── X-User-Roles / X-User-Permissions (the caller's, in the request's app) ──
+
+func decide(t *testing.T, opaResult string) *httptest.ResponseRecorder {
+	t.Helper()
+	opa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(opaResult))
+	}))
+	t.Cleanup(opa.Close)
+
+	mux := newMux(opa.URL, silentLogger())
+	req := httptest.NewRequest(http.MethodPost, "/v1/data/rbac/decision", strings.NewReader(`{"input":{}}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestProxyForwardsRolesAndPermissionsHeaders(t *testing.T) {
+	rec := decide(t, `{"result":{"allow":true,"groups":["staff-support"],"organizations":[],"roles":["support"],"permissions":["orgs:read","users:read"],"reason":"ok"}}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("X-User-Roles"); got != `["support"]` {
+		t.Fatalf("expected X-User-Roles JSON array, got %q", got)
+	}
+	if got := rec.Header().Get("X-User-Permissions"); got != `["orgs:read","users:read"]` {
+		t.Fatalf("expected X-User-Permissions JSON array, got %q", got)
+	}
+}
+
+func TestProxyEmitsEmptyRolesAndPermissionsWhenAbsent(t *testing.T) {
+	// A decision from a policy that does not carry them (or a caller holding nothing): still set.
+	for _, result := range []string{
+		`{"result":{"allow":true,"groups":[],"organizations":[],"reason":"ok"}}`,
+		`{"result":{"allow":true,"groups":[],"organizations":[],"roles":null,"permissions":[],"reason":"ok"}}`,
+	} {
+		rec := decide(t, result)
+		if got := rec.Header().Get("X-User-Roles"); got != "[]" {
+			t.Fatalf("expected empty X-User-Roles for %s, got %q", result, got)
+		}
+		if got := rec.Header().Get("X-User-Permissions"); got != "[]" {
+			t.Fatalf("expected empty X-User-Permissions for %s, got %q", result, got)
+		}
+	}
+}
+
+func TestProxyForwardsRolesAndPermissionsOnDeny(t *testing.T) {
+	rec := decide(t, `{"result":{"allow":false,"groups":["staff-viewers"],"organizations":[],"roles":["viewer"],"permissions":["groups:read"],"reason":"forbidden"}}`)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("X-User-Roles"); got != `["viewer"]` {
+		t.Fatalf("expected X-User-Roles on deny, got %q", got)
+	}
+	if got := rec.Header().Get("X-User-Permissions"); got != `["groups:read"]` {
+		t.Fatalf("expected X-User-Permissions on deny, got %q", got)
+	}
+}
+
+func TestProxyBooleanResultSetsNoIdentityHeaders(t *testing.T) {
+	// The legacy /allow shape carries no identity: none of the decision headers may appear.
+	for _, result := range []string{`{"result":true}`, `{"result":false}`} {
+		rec := decide(t, result)
+		for _, h := range []string{"X-User-Groups", "X-User-Organizations", "X-User-Roles", "X-User-Permissions"} {
+			if _, ok := rec.Header()[h]; ok {
+				t.Fatalf("expected no %s for %s, got %q", h, result, rec.Header().Get(h))
+			}
+		}
+	}
+}

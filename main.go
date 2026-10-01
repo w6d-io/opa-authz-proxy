@@ -142,7 +142,8 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 
 		// Accept two shapes for /v1/data/rbac/* responses:
 		//   1. { "result": true|false }                                  -> legacy /allow
-		//   2. { "result": { "allow": bool, "groups": [...] } }          -> /decision
+		//   2. { "result": { "allow": bool, "groups": [...], ... } }     -> /decision
+		//      (also organizations, roles, permissions, reason)
 		// The /decision shape lets the proxy inject X-User-Groups from
 		// server-side trusted data (OPA's data.bindings.group_membership
 		// fed by OPAL from Redis) without exposing Kratos metadata_admin
@@ -171,25 +172,22 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 			Allow         bool     `json:"allow"`
 			Groups        []string `json:"groups"`
 			Organizations []string `json:"organizations"`
+			Roles         []string `json:"roles"`
+			Permissions   []string `json:"permissions"`
 			Reason        string   `json:"reason"`
 		}
 		if err := json.Unmarshal(envelope.Result, &rich); err == nil && len(envelope.Result) > 0 && envelope.Result[0] == '{' {
 			allowed = rich.Allow
 			reason = rich.Reason
-			// Always set the headers (empty array when no groups /
-			// organizations) so the upstream sees a deterministic
-			// value via oathkeeper's forward_response_headers_to_upstream.
-			groupsJSON, _ := json.Marshal(rich.Groups)
-			if rich.Groups == nil {
-				groupsJSON = []byte("[]")
-			}
-			w.Header().Set("X-User-Groups", string(groupsJSON))
-
-			orgsJSON, _ := json.Marshal(rich.Organizations)
-			if rich.Organizations == nil {
-				orgsJSON = []byte("[]")
-			}
-			w.Header().Set("X-User-Organizations", string(orgsJSON))
+			// Always set the headers (empty array when the decision
+			// carries none) so the upstream sees a deterministic value
+			// via oathkeeper's forward_response_headers_to_upstream.
+			// Roles and permissions are the caller's in the request's
+			// app, as rbac.decision resolved them.
+			w.Header().Set("X-User-Groups", jsonArray(rich.Groups))
+			w.Header().Set("X-User-Organizations", jsonArray(rich.Organizations))
+			w.Header().Set("X-User-Roles", jsonArray(rich.Roles))
+			w.Header().Set("X-User-Permissions", jsonArray(rich.Permissions))
 
 			// Emit the reason as an informational header. Stays a 403
 			// either way; upstreams that wire forward_response_headers
@@ -220,6 +218,18 @@ func newMux(upstream string, logger *slog.Logger) *http.ServeMux {
 	})
 
 	return mux
+}
+
+// jsonArray renders a header value as a JSON array, "[]" when empty.
+func jsonArray(values []string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(values)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
 }
 
 func env(key, fallback string) string {
