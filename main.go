@@ -202,6 +202,10 @@ func newMux(upstream, opaToken string, logger *slog.Logger) *http.ServeMux {
 			Roles         []string `json:"roles"`
 			Permissions   []string `json:"permissions"`
 			Reason        string   `json:"reason"`
+			// Organization context, on org-scoped rows and for org API keys (rbac.decision).
+			OrgID    string   `json:"org_id"`
+			OrgRoles []string `json:"org_roles"`
+			ClientID string   `json:"client_id"`
 		}
 		if err := json.Unmarshal(envelope.Result, &rich); err == nil && len(envelope.Result) > 0 && envelope.Result[0] == '{' {
 			allowed = rich.Allow
@@ -215,6 +219,12 @@ func newMux(upstream, opaToken string, logger *slog.Logger) *http.ServeMux {
 			w.Header().Set("X-User-Organizations", jsonArray(rich.Organizations))
 			w.Header().Set("X-User-Roles", jsonArray(rich.Roles))
 			w.Header().Set("X-User-Permissions", jsonArray(rich.Permissions))
+			// The organization the request acts in, the caller's org roles there for this app, and the
+			// org API key that called. Set every time (empty when none), so an upstream reading them
+			// through forward_response_headers never sees a value a client sent.
+			w.Header().Set("X-Org-Id", headerValue(rich.OrgID))
+			w.Header().Set("X-Org-Roles", jsonArray(rich.OrgRoles))
+			w.Header().Set("X-Client-Id", headerValue(rich.ClientID))
 
 			// Emit the reason as an informational header. Stays a 403
 			// either way; upstreams that wire forward_response_headers
@@ -248,6 +258,21 @@ func newMux(upstream, opaToken string, logger *slog.Logger) *http.ServeMux {
 }
 
 // jsonArray renders a header value as a JSON array, "[]" when empty.
+// headerValue keeps a decision string safe as a header value: no control characters, bounded.
+func headerValue(v string) string {
+	out := make([]rune, 0, len(v))
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		out = append(out, r)
+		if len(out) >= 256 {
+			break
+		}
+	}
+	return string(out)
+}
+
 func jsonArray(values []string) string {
 	if len(values) == 0 {
 		return "[]"

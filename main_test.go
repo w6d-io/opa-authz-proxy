@@ -612,3 +612,43 @@ func TestCheckToken(t *testing.T) {
 		t.Fatal("the error must not contain the token")
 	}
 }
+
+// ─── X-Org-Id / X-Org-Roles / X-Client-Id (organization context from the decision) ──
+
+func TestProxyForwardsOrgContextHeaders(t *testing.T) {
+	rec := decide(t, `{"result":{"allow":true,"groups":[],"organizations":["o1"],"roles":[],"permissions":[],"org_id":"o1","org_roles":["admin"],"client_id":"","reason":"ok"}}`)
+	if got := rec.Header().Get("X-Org-Id"); got != "o1" {
+		t.Fatalf("expected X-Org-Id o1, got %q", got)
+	}
+	if got := rec.Header().Get("X-Org-Roles"); got != `["admin"]` {
+		t.Fatalf("expected X-Org-Roles JSON array, got %q", got)
+	}
+	if got := rec.Header().Get("X-Client-Id"); got != "" {
+		t.Fatalf("expected empty X-Client-Id, got %q", got)
+	}
+}
+
+func TestProxyForwardsOrgKeyAndStripsControlCharacters(t *testing.T) {
+	rec := decide(t, `{"result":{"allow":true,"groups":[],"organizations":[],"org_id":"o2\r\nX-Evil: 1","org_roles":null,"client_id":"key-1","reason":"ok"}}`)
+	if got := rec.Header().Get("X-Org-Id"); got != "o2X-Evil: 1" {
+		t.Fatalf("expected control characters stripped, got %q", got)
+	}
+	if got := rec.Header().Get("X-Org-Roles"); got != "[]" {
+		t.Fatalf("expected empty X-Org-Roles, got %q", got)
+	}
+	if got := rec.Header().Get("X-Client-Id"); got != "key-1" {
+		t.Fatalf("expected X-Client-Id key-1, got %q", got)
+	}
+}
+
+func TestProxySetsEmptyOrgContextWhenAbsent(t *testing.T) {
+	rec := decide(t, `{"result":{"allow":true,"groups":[],"organizations":[],"reason":"ok"}}`)
+	for _, h := range []string{"X-Org-Id", "X-Client-Id"} {
+		if _, ok := rec.Header()[h]; !ok || rec.Header().Get(h) != "" {
+			t.Fatalf("expected %s present and empty, got %q (present %v)", h, rec.Header().Get(h), ok)
+		}
+	}
+	if got := rec.Header().Get("X-Org-Roles"); got != "[]" {
+		t.Fatalf("expected empty X-Org-Roles, got %q", got)
+	}
+}
